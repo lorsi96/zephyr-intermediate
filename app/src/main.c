@@ -4,46 +4,78 @@
 LOG_MODULE_REGISTER(demo, LOG_LEVEL_DBG);
 
 #define STACK_SIZE 1024
+#define PRIO 5
+#define TEST_MAX_CNT  1000000UL
+// #define ATOMIC_TEST
 
-#define PRIO_A 7
-#define PRIO_B 5
-#define PRIO_C 3
+/* Shared counter. */
+#ifdef ATOMIC_TEST
+atomic_t shared_cnt = ATOMIC_INIT(0);
+#else
+static volatile uint32_t shared_cnt = 0;
+#endif
 
-#define PRIO_COOP    -1
-#define ITERS_COOP    5
-#define SLEEP_COOP_US 100000
 
+/* Counter update strategies. */
 
-void thread_fn(const char *msg, uint32_t sleep_ms)
-{
-    for(;;) {
-        LOG_INF("%s", msg);
-        k_msleep(sleep_ms);
-    }
+// Atomic.
+#ifdef ATOMIC_TEST
+static inline void atomic_cnt_update() {
+    atomic_inc(&shared_cnt);
+}
+#endif
+
+// Mutexed.
+K_MUTEX_DEFINE(homework_mutex);
+static inline void safe_cnt_update() {
+    k_mutex_lock(&homework_mutex, K_FOREVER);
+    shared_cnt++;
+    k_mutex_unlock(&homework_mutex);
 }
 
-void _thread_coop_fn(void *p1, void *p2, void *p3) {
-    for(uint8_t i=0;i<ITERS_COOP;i++) {
-        LOG_INF("T_COOP Running (%d/%d)", i+1, ITERS_COOP);
-	k_busy_wait(SLEEP_COOP_US);
-    }
+// Unsafe.
+static inline void unsafe_cnt_update() {
+    shared_cnt++;
+}
+
+/* Program. */
+
+K_SEM_DEFINE(thread_sem, 0, 2);
+void thread_fn(void *p1, void *p2, void *p3) {
+  for(uint32_t i=0; i<TEST_MAX_CNT; i++) {
+	#ifdef ATOMIC_TEST
+	atomic_cnt_update();
+	#else
+	safe_cnt_update();
+	#endif
+  }
+  k_sem_give(&thread_sem);
 }
 
 
-K_THREAD_DEFINE(thread_high_fn, STACK_SIZE, thread_fn,
-                /*msg=*/"T_HIGH_running",
-		/*sleep_ms=*/100, NULL, PRIO_C, 0, 0);
-K_THREAD_DEFINE(thread_mid_fn, STACK_SIZE, thread_fn,
-                /*msg=*/"T_MID_running",
-		/*sleep_ms=*/200, NULL, PRIO_B, 0, 0);
-K_THREAD_DEFINE(thread_low_fn, STACK_SIZE, thread_fn,
-                /*msg=*/"T_LOW_running",
-		/*sleep_ms=*/300, NULL, PRIO_A, 0, 0);
-K_THREAD_DEFINE(thread_coop_fn, STACK_SIZE, _thread_coop_fn,
-                NULL, NULL, NULL, PRIO_COOP, 0, 0);  
+K_THREAD_DEFINE(thread_a, STACK_SIZE, thread_fn,
+                NULL, NULL, NULL, PRIO, 0, 0);
+K_THREAD_DEFINE(thread_b, STACK_SIZE, thread_fn,
+                NULL, NULL, NULL, PRIO, 0, 0);
 
 int main(void)
 {
-    return 0;
+  k_sem_take(&thread_sem, K_FOREVER);
+  k_sem_take(&thread_sem, K_FOREVER);
+
+  uint32_t cnt;
+  #ifdef ATOMIC_TEST
+  cnt = (uint32_t)atomic_get(&shared_cnt);
+  #else
+  cnt = shared_cnt; 
+  #endif
+
+  if (shared_cnt != (2*TEST_MAX_CNT)) {
+    LOG_ERR("shared_cnt = %d", cnt);
+  } else {
+    LOG_INF("shared_cnt = %d", cnt);
+  }
+
+  return 0;
 }
 
