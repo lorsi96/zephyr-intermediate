@@ -1,81 +1,72 @@
+/*
+ * Lecture 3 - Homework Starter Code
+ *
+ * ================================================================
+ * TASKS
+ * ================================================================
+ */
+
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <stdbool.h>
 
-LOG_MODULE_REGISTER(demo, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(homework, LOG_LEVEL_DBG);
 
-#define STACK_SIZE 1024
-#define PRIO 5
-#define TEST_MAX_CNT  1000000UL
-// #define ATOMIC_TEST
+#define STACK_SIZE    1024
+#define SENSOR_MS     100    /* sensor fires every 100ms */
+#define BURST_MS      20
+#define POLL_MS       10     /* polling consumer checks every 10ms */
+#define EVENT_COUNT   10     /* total sensor events to produce */
+#define FAST_EV_CNT   5
+#define RESCH_MS      30
 
-/* Shared counter. */
-#ifdef ATOMIC_TEST
-atomic_t shared_cnt = ATOMIC_INIT(0);
-#else
-static volatile uint32_t shared_cnt = 0;
-#endif
+/* Statistics */
+static int total_events;
+static int total_processed;
 
 
-/* Counter update strategies. */
-
-// Atomic.
-#ifdef ATOMIC_TEST
-static inline void atomic_cnt_update() {
-    atomic_inc(&shared_cnt);
-}
-#endif
-
-// Mutexed.
-K_MUTEX_DEFINE(homework_mutex);
-static inline void safe_cnt_update() {
-    k_mutex_lock(&homework_mutex, K_FOREVER);
-    shared_cnt++;
-    k_mutex_unlock(&homework_mutex);
+static void sensor_handler(struct k_work *work) {
+      ARG_UNUSED(work);
+      total_processed++;
+      LOG_INF("[HANDLER] processed event %d  tick=%u",
+              total_processed, k_uptime_get_32());
 }
 
-// Unsafe.
-static inline void unsafe_cnt_update() {
-    shared_cnt++;
+K_WORK_DELAYABLE_DEFINE(sensor_work, sensor_handler);
+
+/* I also migrated sensor_sim_fn to a self reschedule handler for more pratice. */
+static void sensor_sim_handler(struct k_work *work) {
+	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+        total_events++;
+        LOG_INF("[SENSOR] event %d  tick=%u", total_events, k_uptime_get_32());
+
+
+        int ret = k_work_reschedule(&sensor_work, K_MSEC(RESCH_MS));
+        if (ret < 0) { 
+		LOG_ERR("submit failed: %d", ret); 
+	}
+	
+	if (total_events >= EVENT_COUNT) {
+		return;
+	}
+
+        /* Keep EVENT_COUNT events, but fire the first FAST_EV_CNT "faster". */
+	ret = k_work_reschedule(dwork, K_MSEC(total_events < FAST_EV_CNT ? BURST_MS : SENSOR_MS));
+        if (ret < 0) { 
+		LOG_ERR("delayed work submit failed: %d", ret); 
+	}
+
 }
 
-/* Program. */
-
-K_SEM_DEFINE(thread_sem, 0, 2);
-void thread_fn(void *p1, void *p2, void *p3) {
-  for(uint32_t i=0; i<TEST_MAX_CNT; i++) {
-	#ifdef ATOMIC_TEST
-	atomic_cnt_update();
-	#else
-	safe_cnt_update();
-	#endif
-  }
-  k_sem_give(&thread_sem);
-}
-
-
-K_THREAD_DEFINE(thread_a, STACK_SIZE, thread_fn,
-                NULL, NULL, NULL, PRIO, 0, 0);
-K_THREAD_DEFINE(thread_b, STACK_SIZE, thread_fn,
-                NULL, NULL, NULL, PRIO, 0, 0);
+K_WORK_DELAYABLE_DEFINE(sensor_sim, sensor_sim_handler);
 
 int main(void)
 {
-  k_sem_take(&thread_sem, K_FOREVER);
-  k_sem_take(&thread_sem, K_FOREVER);
+    k_work_schedule(&sensor_sim, K_MSEC(50));
 
-  uint32_t cnt;
-  #ifdef ATOMIC_TEST
-  cnt = (uint32_t)atomic_get(&shared_cnt);
-  #else
-  cnt = shared_cnt; 
-  #endif
+    /* Wait long enough for all events to complete */
+    k_msleep((EVENT_COUNT + 2) * SENSOR_MS + 500);
 
-  if (shared_cnt != (2*TEST_MAX_CNT)) {
-    LOG_ERR("shared_cnt = %d", cnt);
-  } else {
-    LOG_INF("shared_cnt = %d", cnt);
-  }
-
-  return 0;
+    return 0;
 }
 
